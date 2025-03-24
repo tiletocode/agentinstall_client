@@ -2,11 +2,29 @@ import yaml
 import configparser
 import requests
 import sys
-import subprocess
 import os
 import getpass
 import re
+import sh
 from datetime import datetime
+
+def do_command_line(args):
+    try:
+        # 첫 번째 인자는 명령어로 사용하고 나머지는 인자들로 처리
+        command_name = args[0]
+        command_args = args[1:]
+
+        # sh 모듈에서 동적으로 명령어를 가져옵니다
+        command = getattr(sh, command_name)
+
+        # 동적으로 실행된 명령어를 호출합니다
+        output = command(*command_args)
+        if output is not None and len(output) > 0:
+            print("Command output:", output)
+    except sh.ErrorReturnCode as e:
+        print(f"Error occurred: {e.stderr.decode()}")
+    except AttributeError:
+        print(f"Error: Command '{command_name}' not found.")
 
 def check_path_permissions(path):
     """
@@ -136,6 +154,7 @@ def create_infra_conf(file_path, license_code, server_host, server_port):
     :param file_path: 생성할 파일 경로
     :param license_code: license 값
     :param server_host: whatap.server.host 값 (기본값: 빈 문자열)
+    :param server_port: whatap.server.port 값
     """
     try:
         # 현재 시간: 나노초
@@ -150,9 +169,9 @@ createdtime={created_time}"""
         # 디렉토리 확인 및 생성
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-        # 파일 쓰기
-        with open(file_path, "w") as conf_file:
-            conf_file.write(content)
+        # 파일을 쓰기 위해 sudo 명령어 사용
+        command = f"echo \"{content}\" | sudo tee {file_path}"
+        do_command_line(command.split())
 
         print(f"파일 생성 완료: {file_path}")
         print("내용:")
@@ -161,36 +180,32 @@ createdtime={created_time}"""
     except Exception as e:
         print(f"파일 생성 중 오류 발생: {e}")
 
-# def install_deb_package(deb_file_path):
-#     """
-#     .deb 패키지를 설치합니다.
+def install_package(package_file_path, package_type):
+    """
+    패키지를 설치합니다 (deb 또는 rpm).
 
-#     :param deb_file_path: .deb 파일 경로
-#     """
-#     try:
-#         print(f"{deb_file_path} 설치 중...")
-#         # dpkg 명령 실행
-#         subprocess.run(["dpkg", "-i", deb_file_path], check=True)
-#         print("INFRA Agent 설치 완료")
-#     except subprocess.CalledProcessError as e:
-#         print(f"설치 중 오류 발생: {e}")
-#     except FileNotFoundError:
-#         print("설치 파일이 존재하지 않습니다.")
+    :param package_file_path: 패키지 파일 경로
+    :param package_type: 패키지 타입 ("deb" 또는 "rpm")
+    """
+    if package_type == "deb":
+        print(f"{package_file_path} 설치 중...")
+        result = do_command_line(["sudo", "dpkg", "-i", package_file_path])
+    elif package_type == "rpm":
+        print(f"{package_file_path} 설치 중...")
+        # 패키지 설치 여부 확인
+        result = do_command_line(["sudo", "rpm", "-q", "--whatprovides", package_file_path])
+        if result.returncode == 0:
+            # 패키지가 이미 설치되어 있는 경우 업그레이드
+            result = do_command_line(["sudo", "rpm", "-Uvh", "--replacepkgs", package_file_path])
+        else:
+            # 패키지가 설치되어 있지 않은 경우 신규 설치
+            result = do_command_line(["sudo", "rpm", "-ivh", "--replacepkgs", package_file_path])
+    else:
+        print("지원하지 않는 패키지 타입입니다.")
+        return
 
-# def install_rpm_package(rpm_file_path):
-#     """
-#     .rpm 패키지를 설치합니다.
+    print("INFRA Agent 설치 완료")
 
-#     :param rpm_file_path: .rpm 파일 경로
-#     """
-#     try:
-#         print(f"{rpm_file_path} 설치 중...")
-#         subprocess.run(["rpm", "-ivh", "--replacepkgs", rpm_file_path], check=True)
-#         print("INFRA Agent 설치 완료")
-#     except subprocess.CalledProcessError as e:
-#         print(f"설치 중 오류 발생: {e}")
-#     except FileNotFoundError:
-#         print("설치 파일이 존재하지 않습니다.")
 
 def extract_tar_gz(file_path, output_dir):
     """
@@ -200,7 +215,7 @@ def extract_tar_gz(file_path, output_dir):
     :param output_dir: 압축 해제할 디렉토리 경로
     """
     try:
-        subprocess.run(["tar", "-zxvf", file_path, "--no-same-owner"], cwd=output_dir, check=True)
+        do_command_line(["tar", "-zxvf", file_path, "--no-same-owner", "-C", output_dir])
     except Exception as e:
         print(f"압축 해제 실패: {e}")
 
@@ -264,32 +279,29 @@ def subproc_uid(java_bin_path, uid_dir, user_id, user_password):
     try:
         dbx_file_path = get_dbx_file(uid_dir)
         #java -cp $EXE_DBX_JAR whatap.dbx.DbUser -update -uid $WUID -user $WUSER -password $WPASSWORD
-        subprocess.run([java_bin_path, "-cp", dbx_file_path, "whatap.dbx.DbUser", "-update", "-uid", "1000", "-user", user_id, "-password", user_password], cwd=uid_dir, check=True)
+        do_command_line([java_bin_path, "-cp", dbx_file_path, "whatap.dbx.DbUser", "-update", "-uid", "1000", "-user", user_id, "-password", user_password])
         print("uid  완료")
-    except subprocess.CalledProcessError as e:
+    except sh.ErrorReturnCode as e:
         print(f"uid  오류 발생: {e}")
 
 def subproc_mv(source_dir, dest_dir):
-    try:
-        subprocess.run(["mv", source_dir, dest_dir], check=True)
-        print(f"mv 완료: {dest_dir}")
-    except subprocess.CalledProcessError as e:
-        print(f"mv 오류 발생: {e}")
+    do_command_line(["mv", source_dir, dest_dir])
+    print(f"mv 완료: {dest_dir}")
 
 
 def subproc_startd(dest_dir):
     try:
-        subprocess.run(["sh", "startd.sh"], cwd=dest_dir, check=True)
+        do_command_line(["sh", "startd.sh"], cwd=dest_dir)
         print("start 완료")
-    except subprocess.CalledProcessError as e:
+    except sh.ErrorReturnCode as e:
         print(f"start 오류 발생: {e}")
 
 
 def infra_agent_start():
     try:
-        subprocess.run(["systemctl", "restart", "whatap-infra.service"], check=True)
+        do_command_line(["systemctl", "restart", "whatap-infra.service"])
         print("restart 완료")
-    except subprocess.CalledProcessError as e:
+    except sh.ErrorReturnCode as e:
         print(f"restart 오류 발생: {e}")
 
 
@@ -383,25 +395,7 @@ def infra_agent_install(config, license_key):
     print("=== Agent 재기동 ===")
     infra_agent_start()
 
-def install_package(package_file_path, package_type):
-    """
-    패키지를 설치합니다 (deb 또는 rpm).
 
-    :param package_file_path: 패키지 파일 경로
-    :param package_type: 패키지 타입 ("deb" 또는 "rpm")
-    """
-    if package_type == "deb":
-        print(f"{package_file_path} 설치 중...")
-        subprocess.run(["dpkg", "-i", package_file_path], check=True)
-    elif package_type == "rpm":
-        print(f"{package_file_path} 설치 중...")
-        subprocess.run(["rpm", "-ivh", package_file_path], check=True)
-    else:
-        print("지원하지 않는 패키지 타입입니다.")
-        return
-
-    print("INFRA Agent 설치 완료")
-    
 def select_logging_framework():
     print("Log 프레임워크 종류를 입력하세요.")
     print("1. logback-1.2.8 이상")
@@ -527,7 +521,7 @@ def java_agent_install(config, license_key):
 
      
     while True:
-        was_dir=input("WAS 또는 Spring boot 실행경로를 입력하세요.(ex: /app/esg_main/bin) : ")
+        was_dir=input("WAS 또는 Spring boot 실행경로는 입력하세요.(ex: /app/esg_main/bin) : ")
         was_dir_permission = check_path_permissions(was_dir)
         if was_dir_permission["permission"] != "read-write":
             print(f"'{was_dir}' 경로가 존재하지 않거나 read-write 권한이 없습니다.")
